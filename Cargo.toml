@@ -1,0 +1,9 @@
+[package]
+name = "trace-normalizer"
+version = "0.1.0"
+authors = ["HarkonenBade <github@harkonen.net>"]
+edition = "2018"
+
+[dependencies]
+serde = "1"
+serde_json = {"version" = "1", "features" = ["preserve_order"]}
