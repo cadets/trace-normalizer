@@ -7,6 +7,32 @@ use std::{
 
 use serde_json::{self, Value};
 
+trait ValueExt {
+    fn has<I>(&self, index: I) -> bool
+    where
+        I: serde_json::value::Index;
+    fn set<K, T>(&mut self, key: K, value: T) where
+        K: ToString,
+        T: Into<Value>;
+}
+
+impl ValueExt for Value {
+    fn has<I>(&self, index: I) -> bool
+        where
+            I: serde_json::value::Index
+    {
+        self.get(index).is_some()
+    }
+
+    fn set<K, T>(&mut self, key: K, value: T)
+    where
+        K: ToString,
+        T: Into<Value>,
+    {
+        self.as_object_mut().unwrap().insert(key.to_string(), value.into());
+    }
+}
+
 fn main() {
     let args = env::args().collect::<Vec<_>>();
 
@@ -55,17 +81,15 @@ fn main() {
 }
 
 fn tf_host_uuid(rec: &mut Value) {
-    if rec.get("host").is_none() {
-        rec.as_object_mut()
-            .unwrap()
-            .insert("host".into(), "44444444:4444:4444:4444:444444444444".into());
+    if !rec.has("host") {
+        rec.set("host", "44444444:4444:4444:4444:444444444444");
     }
 }
 
 fn tf_mmap_share(rec: &mut Value) {
     if rec["event"] == "audit:event:aue_mmap:"
-        && rec.get("arg_sharing_flags").is_none()
-        && rec.get("arg_mem_flags").is_some()
+        && !rec.has("arg_sharing_flags")
+        && rec.has("arg_mem_flags")
     {
         let mut flags = Vec::new();
 
@@ -87,8 +111,6 @@ fn tf_mmap_share(rec: &mut Value) {
             flags.push("MAP_PRIVATE");
         }
 
-        rec.as_object_mut()
-            .unwrap()
-            .insert("arg_sharing_flags".into(), flags.into());
+        rec.set("arg_sharing_flags", flags);
     }
 }
