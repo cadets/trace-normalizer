@@ -1,7 +1,7 @@
 use std::{
     env,
     fs::File,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, BufWriter, Read, Write},
     process,
 };
 
@@ -21,11 +21,11 @@ fn main() {
         Box::new(File::open(&args[1]).unwrap())
     });
 
-    let mut fout: Box<Write> = if args[2] == "-" {
+    let mut fout: BufWriter<Box<Write>> = BufWriter::new(if args[2] == "-" {
         Box::new(io::stdout())
     } else {
         Box::new(File::create(&args[2]).unwrap())
-    };
+    });
 
     for line in fin.lines() {
         let mut line = line.unwrap();
