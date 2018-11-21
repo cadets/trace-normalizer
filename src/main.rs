@@ -63,7 +63,10 @@ fn tf_host_uuid(rec: &mut Value) {
 }
 
 fn tf_mmap_share(rec: &mut Value) {
-    if rec["event"] == "audit:event:aue_mmap:" && rec.get("arg_sharing_flags").is_none() {
+    if rec["event"] == "audit:event:aue_mmap:"
+        && rec.get("arg_sharing_flags").is_none()
+        && rec.get("arg_mem_flags").is_some()
+    {
         let mut flags = Vec::new();
 
         if rec["arg_mem_flags"]
