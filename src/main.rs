@@ -33,9 +33,12 @@ use std::{
     env,
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    thread,
+    sync::mpsc,
     process,
 };
 
+use rayon::prelude::*;
 use serde_json::{self, Value};
 
 trait ValueExt {
@@ -72,43 +75,98 @@ fn main() {
         process::exit(1);
     }
 
-    let fin: BufReader<Box<Read>> = BufReader::new(if args[1] == "-" {
+    let fin: Box<Read + Send> = if args[1] == "-" {
         Box::new(io::stdin())
     } else {
         Box::new(File::open(&args[1]).unwrap())
-    });
+    };
 
-    let mut fout: BufWriter<Box<Write>> = BufWriter::new(if args[2] == "-" {
+    let fout: Box<Write + Send> = if args[2] == "-" {
         Box::new(io::stdout())
     } else {
         Box::new(File::create(&args[2]).unwrap())
-    });
+    };
 
-    for line in fin.lines() {
-        let mut line = line.unwrap();
-        if line == "" || line == "[" || line == "]" {
-            continue;
-        }
-        if line.starts_with(", ") {
-            line.drain(0..2);
-        }
+    process(fin, fout)
+}
 
-        let mut rec = match serde_json::from_str::<Value>(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("{}", e);
-                continue;
+fn process<R, W>(input: R, output: W)
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+{
+    let fin = BufReader::new(input);
+    let mut fout = BufWriter::new(output);
+
+    let (in_w, proc_r) = mpsc::sync_channel(1);
+
+    let thr_input = thread::spawn(
+        move || {
+            let mut v = Some(Vec::new());
+            for line in fin.lines() {
+                let mut line = line.unwrap();
+                if line == "" || line == "[" || line == "]" {
+                    continue;
+                }
+                if line.starts_with(", ") {
+                    line.drain(0..2);
+                }
+
+                v.as_mut().unwrap().push(line);
+                if v.as_ref().unwrap().len() >= 1024 {
+                    in_w.send(v.take().unwrap()).unwrap();
+                    v = Some(Vec::new());
+                }
             }
-        };
-
-        {
-            tf_host_uuid(&mut rec);
-            tf_mmap_share(&mut rec);
+            in_w.send(v.take().unwrap()).unwrap();
         }
+    );
 
-        serde_json::to_writer(&mut fout, &rec).unwrap();
-        writeln!(&mut fout).unwrap();
-    }
+    let (proc_w, out_r) = mpsc::sync_channel::<Vec<String>>(1);
+
+    let thr_proc = thread::spawn(
+        move || {
+            for v in proc_r {
+                let out = v.into_par_iter()
+                    .filter_map(|val| {
+                        match serde_json::from_str::<Value>(&val) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                eprintln!("{}", e);
+                                None
+                            }
+                        }
+                    })
+                    .update(|val| tf_host_uuid(val))
+                    .update(|val| tf_mmap_share(val))
+                    .filter_map(|val| {
+                        match serde_json::to_string(&val) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                eprintln!("{}", e);
+                                None
+                            }
+                        }
+                    })
+                    .collect();
+                proc_w.send(out).unwrap();
+            }
+        }
+    );
+
+    let thr_out = thread::spawn(
+        move || {
+            for v in out_r {
+                for l in v {
+                    writeln!(&mut fout, "{}", l).unwrap();
+                }
+            }
+        }
+    );
+
+    thr_input.join().unwrap();
+    thr_proc.join().unwrap();
+    thr_out.join().unwrap();
 }
 
 fn tf_host_uuid(rec: &mut Value) {
