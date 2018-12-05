@@ -171,7 +171,7 @@ fn process<R, W>(input: R, output: W)
 
 fn tf_host_uuid(rec: &mut Value) {
     if !rec.has("host") {
-        rec.set("host", "44444444:4444:4444:4444:444444444444");
+        rec.set("host", "44444444-4444-4444-4444-444444444444");
     }
 }
 
