@@ -29,43 +29,20 @@
 // SUCH DAMAGE.
 //
 
+mod transform;
+mod value_ext;
+
 use std::{
     env,
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
-    thread,
-    sync::mpsc,
     process,
+    sync::mpsc,
+    thread,
 };
 
 use rayon::prelude::*;
 use serde_json::{self, Value};
-
-trait ValueExt {
-    fn has<I>(&self, index: I) -> bool
-    where
-        I: serde_json::value::Index;
-    fn set<K, T>(&mut self, key: K, value: T) where
-        K: ToString,
-        T: Into<Value>;
-}
-
-impl ValueExt for Value {
-    fn has<I>(&self, index: I) -> bool
-        where
-            I: serde_json::value::Index
-    {
-        self.get(index).is_some()
-    }
-
-    fn set<K, T>(&mut self, key: K, value: T)
-    where
-        K: ToString,
-        T: Into<Value>,
-    {
-        self.as_object_mut().unwrap().insert(key.to_string(), value.into());
-    }
-}
 
 fn main() {
     let args = env::args().collect::<Vec<_>>();
@@ -91,115 +68,70 @@ fn main() {
 }
 
 fn process<R, W>(input: R, output: W)
-    where
-        R: Read + Send + 'static,
-        W: Write + Send + 'static,
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
 {
     let fin = BufReader::new(input);
     let mut fout = BufWriter::new(output);
 
-    let (in_w, proc_r) = mpsc::sync_channel(1);
+    let (in_w, proc_r) = mpsc::sync_channel(0);
 
-    let thr_input = thread::spawn(
-        move || {
-            let mut v = Some(Vec::new());
-            for line in fin.lines() {
-                let mut line = line.unwrap();
-                if line == "" || line == "[" || line == "]" {
-                    continue;
-                }
-                if line.starts_with(", ") {
-                    line.drain(0..2);
-                }
-
-                v.as_mut().unwrap().push(line);
-                if v.as_ref().unwrap().len() >= 1024 {
-                    in_w.send(v.take().unwrap()).unwrap();
-                    v = Some(Vec::new());
-                }
+    let thr_input = thread::spawn(move || {
+        let mut v = Some(Vec::new());
+        for line in fin.lines() {
+            let mut line = line.unwrap();
+            if line == "" || line == "[" || line == "]" {
+                continue;
             }
-            in_w.send(v.take().unwrap()).unwrap();
-        }
-    );
+            if line.starts_with(", ") {
+                line.drain(0..2);
+            }
 
-    let (proc_w, out_r) = mpsc::sync_channel::<Vec<String>>(1);
-
-    let thr_proc = thread::spawn(
-        move || {
-            for v in proc_r {
-                let out = v.into_par_iter()
-                    .filter_map(|val| {
-                        match serde_json::from_str::<Value>(&val) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                eprintln!("{}", e);
-                                None
-                            }
-                        }
-                    })
-                    .update(|val| tf_host_uuid(val))
-                    .update(|val| tf_mmap_share(val))
-                    .filter_map(|val| {
-                        match serde_json::to_string(&val) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                eprintln!("{}", e);
-                                None
-                            }
-                        }
-                    })
-                    .collect();
-                proc_w.send(out).unwrap();
+            v.as_mut().unwrap().push(line);
+            if v.as_ref().unwrap().len() >= 1024 {
+                in_w.send(v.take().unwrap()).unwrap();
+                v = Some(Vec::new());
             }
         }
-    );
+        in_w.send(v.take().unwrap()).unwrap();
+    });
 
-    let thr_out = thread::spawn(
-        move || {
-            for v in out_r {
-                for l in v {
-                    writeln!(&mut fout, "{}", l).unwrap();
-                }
+    let (proc_w, out_r) = mpsc::sync_channel::<Vec<String>>(0);
+
+    let thr_proc = thread::spawn(move || {
+        for v in proc_r {
+            let out = v
+                .into_par_iter()
+                .filter_map(|val| match serde_json::from_str::<Value>(&val) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        None
+                    }
+                })
+                .update(transform::transform)
+                .filter_map(|val| match serde_json::to_string(&val) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        None
+                    }
+                })
+                .collect();
+            proc_w.send(out).unwrap();
+        }
+    });
+
+    let thr_out = thread::spawn(move || {
+        for v in out_r {
+            for l in v {
+                writeln!(&mut fout, "{}", l).unwrap();
             }
         }
-    );
+    });
 
     thr_input.join().unwrap();
     thr_proc.join().unwrap();
     thr_out.join().unwrap();
-}
-
-fn tf_host_uuid(rec: &mut Value) {
-    if !rec.has("host") {
-        rec.set("host", "44444444-4444-4444-4444-444444444444");
-    }
-}
-
-fn tf_mmap_share(rec: &mut Value) {
-    if rec["event"] == "audit:event:aue_mmap:"
-        && !rec.has("arg_sharing_flags")
-        && rec.has("arg_mem_flags")
-    {
-        let mut flags = Vec::new();
-
-        if rec["arg_mem_flags"]
-            .as_array()
-            .unwrap()
-            .contains(&"PROT_WRITE".into())
-        {
-            let fdpath = rec["fdpath"].as_str().unwrap();
-            if fdpath.starts_with("/lib/")
-                || fdpath.starts_with("/usr/local/lib/")
-                || fdpath.starts_with("/usr/lib/")
-            {
-                flags.push("MAP_SHARED");
-            } else {
-                flags.push("MAP_PRIVATE");
-            }
-        } else {
-            flags.push("MAP_PRIVATE");
-        }
-
-        rec.set("arg_sharing_flags", flags);
-    }
 }
